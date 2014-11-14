@@ -384,7 +384,7 @@ class ServiceManager:
             # the lock ! Which make us _MUST_ do the real lock enter and
             # leave.
             with self._lock :
-                ++self._msgCount
+                self._msgCount += 1
                 self._cv.notify()
                  
             return True
