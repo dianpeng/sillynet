@@ -71,20 +71,20 @@ class Message:
         field. 
     """
 
-    def __init__(self,uid,source,dest,tag,payload):
+    def __init__(self,uid,source,dest,payload,tag):
         self.uid = uid
         self.source = source
         self.dest = dest
-        self.tag = tag
         self.payload = payload
+        self.tag = tag
     
     @staticmethod
-    def makeMessage(source,dest,tag,payload):
+    def makeMessage(source,dest,payload,tag):
         return Message(_UIDGenerator.nextUID(),
                        source,
                        dest,
-                       tag,
-                       payload)
+                       payload,
+                       tag)
 
 class Service:
     queue = None
@@ -106,7 +106,7 @@ class Service:
         # get this service's name
         self.name = name
 
-    def process(self,messenger):
+    def process(self):
         """ The main function for processing message 
 
             This function will be called in the back thread, so
@@ -115,29 +115,28 @@ class Service:
         message = None
         
         try:
-            message = self._queue.get_nowait()
+            message = self.queue.get(True)
         except:
             return
-
-        self.entry.process(message,messenger)
-        
+        self._entry.process(message)
         
     @staticmethod
-    def createBuiltInService(serviceObj,name,queue_size):
-        return Service(serviceObj(),name,queue_size) 
+    def createBuiltInService(serviceObj,name,queue_size,messenger):
+        return Service(serviceObj(messenger),name,queue_size) 
     
     @staticmethod
-    def createExternalService(path,name,queue_size):
+    def createExternalService(path,name,queue_size,messenger):
         s = None
         s = imp.load_source("Service",path)
-        return Service(s.Service(),name,queue_size)
+        return Service(s.Service(messenger),name,queue_size)
         
+# This class is used to handle IO/Timer message 
 
-class RemoteMessageService():
-    """ This class is an implementation for remote message kernel service 
+class IOMessageService():
+    """ This class is an implementation for IO message bulit-in service
 
-        This service is just a service for dumping out the message through
-        the TCP network using a extreamly simple protocol. 
+         It allows user to 1) sechedule a callback function at a timer based
+                           2) send out a piece of packet through TCP ( for simplicity, one one send out message )
     """
     _queue = None
 
@@ -168,6 +167,22 @@ class RemoteMessageService():
     def _fire(p):
         p.send()
         return p
+
+    def _handleTcpTraffic(self,data):
+        point = TCP4ClientEndpoint(reactor,data.payload["address"],data.payload["port"])
+
+        d = point.connect(self.TcpSenderFactory())
+        d.addCallback(self._fire)
+
+    @staticmethod
+    def _timerCallback(data):
+        data.payload["callback"](data.payload["data"])
+
+    def _handleTimerEvent(self,data):
+        reactor.callLater(
+            data.payload["timeout"],
+            self._timerCallback,
+            data)
     
     def _schedule(self):
         while not self._exit:
@@ -177,10 +192,13 @@ class RemoteMessageService():
             except:
                 return
 
-            point = TCP4ClientEndpoint(reactor,data.payload["address"],data.payload["port"])
+            if data.tag == Messenger.tcpServiceTag:
+                self._handleTcpTraffic(data)
+            elif data.tag == Messenger.timerServiceTag:
+                self._handleTimerEvent(data)
+            else:
+                continue
 
-            d = point.connect(self.TcpSenderFactory())
-            d.addCallback(self._fire)
         # Stop here
         self._loopTask.stop()
         reactor.stop()
@@ -220,11 +238,16 @@ class LogMessageService():
 # =====================================
 
 class EchoMessageService():
+    _messenger = None
+
+    def __init__(self,messenger):
+        self._messenger = messenger
+
     """ This is a simple echo message service for debug usage """
-    def process(self,message,messenger):
-        print "[ECHO%d]:%s"%(message.uid,message.payload)
-    
-    
+    def process(self,message):
+        print "[ECHO:(%d)]:%s"%(message.uid,message.payload)
+
+
 class MessengerImp(Messenger):
 
     """ Messenger implementation class 
@@ -238,9 +261,9 @@ class MessengerImp(Messenger):
     def __init__(self,sm):
         self._serviceManager = sm
 
-    def sendMessage(self,source,dest,tag,payload):
+    def sendMessage(self,source,dest,payload,tag):
         self._serviceManager.enqueueMessage(
-            Message.makeMessage(source,dest,tag,payload))
+            Message.makeMessage(source,dest,payload,tag))
         
 class ServiceAccessor:
     """ This class is a helper class for getting service 
@@ -265,8 +288,8 @@ class ServiceAccessor:
         self._returnService = self._detachService()
         return self._returnService
 
-    def __exit__(self):
-        self._attachServiceQueue(self._returnValue)
+    def __exit__(self,t,v,tb):
+        self._attachService(self._returnService)
 
     def _detachService(self):
         """ This function is used to dequeue the request 
@@ -289,16 +312,16 @@ class ServiceAccessor:
 
                 # Now we have a queue and we need to check whether it has message
                 if service.queue.empty():
-                    self._manager._queue.put(service)
+                    self._manager._queue.put_nowait(service)
                     continue
                 else:
                     return service
                 
             # Wait until we have any message pending there
-            self._manager._lock.acquire()
-            while self._manager._msgCount == 0:
-                self._manager._cv.wait()
-            
+            with self._manager._cv:
+                while self._manager._msgCount == 0:
+                    self._manager._cv.wait()
+
        
     def _attachService(self,service):
         self._manager._queue.put(service)
@@ -346,8 +369,8 @@ class ServiceManager:
     _exit = False
     """ The indicator to let all the thread exit """
 
-    _remoteService = None
-    """ Remote service """
+    _ioService = None
+    """ IO service """
 
     _threadPool = []
     
@@ -363,8 +386,8 @@ class ServiceManager:
     def _enqueueRemoteMessage(self,message):
         """ This function is used to enqueue remote message """
         
-        if message.dest == "remote":
-            return self._remoteService.enqueue(message)
+        if message.dest == "io":
+            return self._ioService.enqueue(message)
         else:
             return False
 
@@ -383,7 +406,7 @@ class ServiceManager:
             # Python condition variable cannot notify while not holding 
             # the lock ! Which make us _MUST_ do the real lock enter and
             # leave.
-            with self._lock :
+            with self._cv :
                 self._msgCount += 1
                 self._cv.notify()
                  
@@ -402,31 +425,30 @@ class ServiceManager:
         while not self._exit:
             with ServiceAccessor(self) as service:
                 # assert not service.queue.emtpy(), "The service queue is empty!!!"
-                service.process(messenger)
+                service.process()
 
     def _startThreadPool(self,num):
 
-        for i in range(num):
-            th = threading.Thread(target=self._threadMain,
-                                  args=(self.messengerImp,))
+        for _ in range(num):
+            th = threading.Thread(target=self._threadMain,args=(self.messengerImp,))
             th.start()
             self._threadPool.append(th)
 
-    def _initRemoteService(self,queue_size):
-        self._remoteService = RemoteMessageService(queue_size)
-        self._remoteService.startService()
+    def _initIOService(self,queue_size):
+        self._ioService = IOMessageService(queue_size)
+        self._ioService.startService()
         
     def _initBuiltInService(self,queue_size):
         for entry in self._builtInService:
-            serv = Service.createBuiltInService(entry[1], entry[1], queue_size)
+            serv = Service.createBuiltInService(entry[1], entry[0], queue_size,self.messengerImp)
             self._queue.put_nowait(serv)
-            self._serviceMap[entry[1]] = serv
+            self._serviceMap[entry[0]] = serv
     
     def _initExternalService(self,serviceList,queue_size):
         for service in serviceList:
             service_name = service[0]
             service_path = service[1]
-            serv = Service.createExternalService(service_path,service_name,queue_size)
+            serv = Service.createExternalService(service_path,service_name,queue_size,self.messengerImp)
             self._queue.put_nowait(serv)
             self._serviceMap[service_name] = serv
             
@@ -438,23 +460,21 @@ class ServiceManager:
         parser = ConfigParser.RawConfigParser()
         parser.read("sillynet.cfg")
 
-        serviceSize = parser.getint("Server","serviceSize")
         outstandingQueueSize = parser.getint("Server","outstandingQueueSize")
         threadSize = parser.getint("Server","threadSize")
-
-        # initialize global queue
-        self._queue = Queue(serviceSize)
-
-        # initialize kernel service
-        self._initRemoteService(outstandingQueueSize)
+        services = parser.items("Service")
+		self.serviceSize = len(self._builtInService) + len(services)
+		# initialize global queue
+        self._queue = Queue(self.serviceSize)
+		
+		# initialize IO service
+        self._initIOService(outstandingQueueSize)
         
         # initialize built-in service
         self._initBuiltInService(outstandingQueueSize)
-
-        # loading all the service now
-        services = parser.items("Service")
+		
+		# initialize all the external service
         self._initExternalService(services,outstandingQueueSize)
-        self.serviceSize = len(self._builtInService) + len(services)
 
         # initialize the thread pool
         self._startThreadPool(threadSize)
@@ -468,18 +488,15 @@ class ServiceManager:
         for th in self._threadPool:
             th.join()
 
-        for th in self._kernelService:
-            th.stopService()
+        self._ioService.stopService()
             
         print "Silly net service stops now!"
 
 if __name__ == "__main__":
     mgr = ServiceManager()
     mgr.startService()
-    mgr.messengerImp.sendMessage("_","reecho",
-                                     Messenger.unusedTag,
-                                     "Hello World")
+    
     while True:
-        time.sleep(1)
+        time.sleep(10)
 
 
