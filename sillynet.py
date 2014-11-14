@@ -463,17 +463,18 @@ class ServiceManager:
         outstandingQueueSize = parser.getint("Server","outstandingQueueSize")
         threadSize = parser.getint("Server","threadSize")
         services = parser.items("Service")
-		self.serviceSize = len(self._builtInService) + len(services)
-		# initialize global queue
+	self.serviceSize = len(self._builtInService) + len(services)
+	
+	# initialize global queue
         self._queue = Queue(self.serviceSize)
 		
-		# initialize IO service
+	# initialize IO service
         self._initIOService(outstandingQueueSize)
         
         # initialize built-in service
         self._initBuiltInService(outstandingQueueSize)
 		
-		# initialize all the external service
+	# initialize all the external service
         self._initExternalService(services,outstandingQueueSize)
 
         # initialize the thread pool
