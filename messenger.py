@@ -6,6 +6,8 @@ class Messenger:
     """
 
     userTag = 100
+    unusedTag = 0
+    
     """ This tag value is the minimum user allowed message tag value """
 
     def sendMessage(self,source,dest,tag,payload):
