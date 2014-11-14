@@ -7,7 +7,7 @@ private message queue which ensure each service's callback function only run onc
 also a dedicated thread pool is used to dispatch message and run the callback function.
 
 It contains 4 built-in services: Log,Tcp(most retarded Tcp framwork ever :) ,Timer and Echo. 
-The user can extended  by writing service in python, see test.py for detail.
+The user can extend it  by writing service in python, see test.py for detail.
 
 Config
 ===================
